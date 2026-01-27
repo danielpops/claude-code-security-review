@@ -10,13 +10,25 @@ __author__ = "Anthropic Security Team"
 
 # Import main components for easier access
 from claudecode.github_action_audit import (
-    GitHubActionClient,
     SimpleClaudeRunner,
     main
 )
+from claudecode.github_client import (
+    GitHubClient,
+    GitHubClientError,
+    GitHubAuthenticationError,
+    GitHubAPIError,
+    GitHubValidationError,
+    get_github_client,
+)
 
 __all__ = [
-    "GitHubActionClient",
+    "GitHubClient",
+    "GitHubClientError",
+    "GitHubAuthenticationError",
+    "GitHubAPIError",
+    "GitHubValidationError",
+    "get_github_client",
     "SimpleClaudeRunner",
     "main"
 ]
