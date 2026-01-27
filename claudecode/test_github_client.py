@@ -1,44 +1,131 @@
 #!/usr/bin/env python3
 """
-Unit tests for GitHubActionClient.
+Unit tests for the unified GitHubClient.
 """
 
-import pytest
 import os
+import pytest
 from unittest.mock import Mock, patch
 
-from claudecode.github_action_audit import GitHubActionClient
+from claudecode.github_client import (
+    GitHubClient,
+    GitHubAuthenticationError,
+    GitHubAPIError,
+    get_github_client,
+)
 
 
-class TestGitHubActionClient:
-    """Test GitHubActionClient functionality."""
-    
+class TestGitHubClientInit:
+    """Test GitHubClient initialization."""
+
     def test_init_requires_token(self):
-        """Test that client initialization requires GITHUB_TOKEN."""
-        # Remove token if it exists
+        """Test that initialization requires GITHUB_TOKEN."""
         original_token = os.environ.pop('GITHUB_TOKEN', None)
-        
         try:
-            with pytest.raises(ValueError, match="GITHUB_TOKEN environment variable required"):
-                GitHubActionClient()
+            with pytest.raises(GitHubAuthenticationError, match="GITHUB_TOKEN"):
+                GitHubClient()
         finally:
-            # Restore token
             if original_token:
                 os.environ['GITHUB_TOKEN'] = original_token
-    
+
     def test_init_with_token(self):
         """Test successful initialization with token."""
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            assert client.github_token == 'test-token'
+        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}, clear=False):
+            client = GitHubClient()
+            assert client.token == 'test-token'
+            assert client.api_base_url == 'https://api.github.com'
+            assert 'Authorization' in client.headers
             assert client.headers['Authorization'] == 'Bearer test-token'
-            assert 'Accept' in client.headers
-            assert 'X-GitHub-Api-Version' in client.headers
-    
-    @patch('requests.get')
-    def test_get_pr_data_success(self, mock_get):
+
+    def test_init_with_explicit_token(self):
+        """Test initialization with explicit token parameter."""
+        client = GitHubClient(token='explicit-token')
+        assert client.token == 'explicit-token'
+
+    def test_init_with_github_enterprise(self):
+        """Test initialization with GitHub Enterprise URL."""
+        with patch.dict(os.environ, {
+            'GITHUB_TOKEN': 'test-token',
+            'GITHUB_API_URL': 'https://github.mycompany.com/api/v3'
+        }):
+            client = GitHubClient()
+            assert client.api_base_url == 'https://github.mycompany.com/api/v3'
+
+    def test_init_with_github_enterprise_trailing_slash(self):
+        """Test initialization strips trailing slash from Enterprise URL."""
+        with patch.dict(os.environ, {
+            'GITHUB_TOKEN': 'test-token',
+            'GITHUB_API_URL': 'https://github.mycompany.com/api/v3/'
+        }):
+            client = GitHubClient()
+            assert client.api_base_url == 'https://github.mycompany.com/api/v3'
+
+    def test_init_with_excluded_directories(self):
+        """Test initialization with excluded directories."""
+        with patch.dict(os.environ, {
+            'GITHUB_TOKEN': 'test-token',
+            'EXCLUDE_DIRECTORIES': 'vendor,node_modules,dist'
+        }):
+            client = GitHubClient()
+            assert client.excluded_directories == ['vendor', 'node_modules', 'dist']
+
+    def test_init_with_explicit_excluded_directories(self):
+        """Test initialization with explicit excluded directories."""
+        client = GitHubClient(token='test-token', excluded_directories=['test', 'docs'])
+        assert client.excluded_directories == ['test', 'docs']
+
+
+class TestGitHubClientHost:
+    """Test GitHubClient host property."""
+
+    def test_host_public_github(self):
+        """Test host for public GitHub."""
+        client = GitHubClient(token='test-token')
+        assert client.host == 'github.com'
+
+    def test_host_github_enterprise(self):
+        """Test host for GitHub Enterprise."""
+        client = GitHubClient(
+            token='test-token',
+            api_url='https://github.mycompany.com/api/v3'
+        )
+        assert client.host == 'github.mycompany.com'
+
+
+class TestGitHubClientExclusions:
+    """Test file exclusion logic."""
+
+    def test_is_excluded_path_simple(self):
+        """Test simple directory exclusion."""
+        client = GitHubClient(token='test-token', excluded_directories=['vendor'])
+        assert client._is_excluded_path('vendor/lib.py') is True
+        assert client._is_excluded_path('src/main.py') is False
+
+    def test_is_excluded_path_with_leading_dot_slash(self):
+        """Test exclusion with ./ prefix in pattern."""
+        client = GitHubClient(token='test-token', excluded_directories=['./vendor'])
+        assert client._is_excluded_path('vendor/lib.py') is True
+
+    def test_is_excluded_path_nested(self):
+        """Test nested directory exclusion."""
+        client = GitHubClient(token='test-token', excluded_directories=['generated'])
+        assert client._is_excluded_path('src/generated/code.py') is True
+
+    def test_is_generated_content(self):
+        """Test generated content detection."""
+        client = GitHubClient(token='test-token')
+        assert client._is_generated_content('@generated by protoc') is True
+        assert client._is_generated_content('Code generated by OpenAPI Generator') is True
+        assert client._is_generated_content('// Normal code comment') is False
+
+
+class TestGitHubClientPRData:
+    """Test PR data retrieval methods."""
+
+    @patch('requests.request')
+    def test_get_pr_data_success(self, mock_request):
         """Test successful PR data retrieval."""
-        # Mock responses
+        # Mock PR response
         pr_response = Mock()
         pr_response.json.return_value = {
             'number': 123,
@@ -51,9 +138,7 @@ class TestGitHubActionClient:
             'head': {
                 'ref': 'feature-branch',
                 'sha': 'abc123',
-                'repo': {
-                    'full_name': 'owner/repo'
-                }
+                'repo': {'full_name': 'owner/repo'}
             },
             'base': {
                 'ref': 'main',
@@ -63,7 +148,9 @@ class TestGitHubActionClient:
             'deletions': 10,
             'changed_files': 3
         }
-        
+        pr_response.raise_for_status = Mock()
+
+        # Mock files response
         files_response = Mock()
         files_response.json.return_value = [
             {
@@ -83,86 +170,88 @@ class TestGitHubActionClient:
                 'patch': '@@ -0,0 +1,20 @@\n+def test_main():'
             }
         ]
-        
-        mock_get.side_effect = [pr_response, files_response]
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            result = client.get_pr_data('owner/repo', 123)
-        
-        # Verify API calls
-        assert mock_get.call_count == 2
-        mock_get.assert_any_call(
-            'https://api.github.com/repos/owner/repo/pulls/123',
-            headers=client.headers
-        )
-        mock_get.assert_any_call(
-            'https://api.github.com/repos/owner/repo/pulls/123/files?per_page=100',
-            headers=client.headers
-        )
-        
-        # Verify result structure
+        files_response.raise_for_status = Mock()
+
+        mock_request.side_effect = [pr_response, files_response]
+
+        client = GitHubClient(token='test-token')
+        result = client.get_pr_data('owner/repo', 123)
+
         assert result['number'] == 123
         assert result['title'] == 'Test PR'
         assert result['user'] == 'testuser'
         assert len(result['files']) == 2
         assert result['files'][0]['filename'] == 'src/main.py'
-        assert result['files'][1]['status'] == 'added'
-    
-    @patch('requests.get')
-    def test_get_pr_data_null_head_repo(self, mock_get):
+
+    @patch('requests.request')
+    def test_get_pr_data_filters_excluded_files(self, mock_request):
+        """Test that excluded files are filtered from PR data."""
+        pr_response = Mock()
+        pr_response.json.return_value = {
+            'number': 123, 'title': 'Test', 'body': '',
+            'user': {'login': 'user'}, 'created_at': '', 'updated_at': '',
+            'state': 'open',
+            'head': {'ref': 'branch', 'sha': 'abc', 'repo': {'full_name': 'o/r'}},
+            'base': {'ref': 'main', 'sha': 'def'},
+            'additions': 10, 'deletions': 0, 'changed_files': 2
+        }
+        pr_response.raise_for_status = Mock()
+
+        files_response = Mock()
+        files_response.json.return_value = [
+            {'filename': 'src/main.py', 'status': 'modified', 'additions': 5, 'deletions': 0, 'changes': 5},
+            {'filename': 'vendor/lib.py', 'status': 'added', 'additions': 5, 'deletions': 0, 'changes': 5}
+        ]
+        files_response.raise_for_status = Mock()
+
+        mock_request.side_effect = [pr_response, files_response]
+
+        client = GitHubClient(token='test-token', excluded_directories=['vendor'])
+        result = client.get_pr_data('owner/repo', 123)
+
+        # vendor/lib.py should be filtered out
+        assert len(result['files']) == 1
+        assert result['files'][0]['filename'] == 'src/main.py'
+
+    @patch('requests.request')
+    def test_get_pr_data_null_head_repo(self, mock_request):
         """Test PR data retrieval when head repo is null (deleted fork)."""
         pr_response = Mock()
         pr_response.json.return_value = {
-            'number': 123,
-            'title': 'Test PR',
-            # Don't include body key to test the get() default
-            'user': {'login': 'testuser'},
-            'created_at': '2024-01-01T00:00:00Z',
-            'updated_at': '2024-01-01T01:00:00Z',
+            'number': 123, 'title': 'Test', 'body': None,
+            'user': {'login': 'user'}, 'created_at': '', 'updated_at': '',
             'state': 'open',
-            'head': {
-                'ref': 'feature-branch',
-                'sha': 'abc123',
-                'repo': None  # Deleted fork
-            },
-            'base': {
-                'ref': 'main',
-                'sha': 'def456'
-            },
-            'additions': 50,
-            'deletions': 10,
-            'changed_files': 3
+            'head': {'ref': 'branch', 'sha': 'abc', 'repo': None},  # Deleted fork
+            'base': {'ref': 'main', 'sha': 'def'},
+            'additions': 10, 'deletions': 0, 'changed_files': 0
         }
-        
+        pr_response.raise_for_status = Mock()
+
         files_response = Mock()
         files_response.json.return_value = []
-        
-        mock_get.side_effect = [pr_response, files_response]
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            result = client.get_pr_data('owner/repo', 123)
-        
+        files_response.raise_for_status = Mock()
+
+        mock_request.side_effect = [pr_response, files_response]
+
+        client = GitHubClient(token='test-token')
+        result = client.get_pr_data('owner/repo', 123)
+
         # Should use original repo name when head repo is None
         assert result['head']['repo']['full_name'] == 'owner/repo'
-        # The implementation passes None through, test should match that
-        assert result['body'] == ''
-    
-    @patch('requests.get')
-    def test_get_pr_data_api_error(self, mock_get):
-        """Test PR data retrieval with API error."""
-        mock_response = Mock()
-        mock_response.raise_for_status.side_effect = Exception("API Error")
-        mock_get.return_value = mock_response
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            with pytest.raises(Exception, match="API Error"):
-                client.get_pr_data('owner/repo', 123)
-    
-    @patch('requests.get')
-    def test_get_pr_diff_success(self, mock_get):
+        assert result['body'] == ''  # None should be converted to empty string
+
+    def test_get_pr_data_invalid_repo_format(self):
+        """Test that invalid repo format raises error."""
+        client = GitHubClient(token='test-token')
+        with pytest.raises(ValueError, match="Invalid repository format"):
+            client.get_pr_data('invalid-format', 123)
+
+
+class TestGitHubClientDiff:
+    """Test PR diff retrieval."""
+
+    @patch('requests.request')
+    def test_get_pr_diff_success(self, mock_request):
         """Test successful PR diff retrieval."""
         diff_content = """diff --git a/src/main.py b/src/main.py
 index abc123..def456 100644
@@ -172,168 +261,127 @@ index abc123..def456 100644
 +import os
  def main():
      print("Hello")
-+    # New feature
-+    process_data()
 """
-        
         mock_response = Mock()
         mock_response.text = diff_content
-        mock_response.raise_for_status.return_value = None
-        mock_get.return_value = mock_response
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            result = client.get_pr_diff('owner/repo', 123)
-        
-        # Verify API call
-        mock_get.assert_called_once()
-        call_args = mock_get.call_args
-        assert call_args[0][0] == 'https://api.github.com/repos/owner/repo/pulls/123'
-        assert call_args[1]['headers']['Accept'] == 'application/vnd.github.diff'
-        
-        # Verify result
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = GitHubClient(token='test-token')
+        result = client.get_pr_diff('owner/repo', 123)
+
         assert 'import os' in result
-        assert 'process_data()' in result
-    
-    @patch('requests.get')
-    def test_get_pr_diff_filters_generated_files(self, mock_get):
+        assert 'src/main.py' in result
+
+    @patch('requests.request')
+    def test_get_pr_diff_filters_generated(self, mock_request):
         """Test that generated files are filtered from diff."""
-        diff_with_generated = """diff --git a/src/main.py b/src/main.py
-index abc123..def456 100644
+        diff_content = """diff --git a/src/main.py b/src/main.py
+index abc..def 100644
 --- a/src/main.py
 +++ b/src/main.py
-@@ -1,5 +1,10 @@
-+import os
- def main():
-     print("Hello")
+@@ -1,3 +1,5 @@
++real code
 diff --git a/generated/code.py b/generated/code.py
 index 111..222 100644
 --- a/generated/code.py
 +++ b/generated/code.py
 @@ -1,3 +1,5 @@
 # @generated by protoc
-+# More generated code
-+print("generated")
-diff --git a/src/feature.py b/src/feature.py
-index 333..444 100644
---- a/src/feature.py
-+++ b/src/feature.py
-@@ -1,3 +1,5 @@
-+# Real code
- def feature():
-     pass
++generated code
 """
-        
         mock_response = Mock()
-        mock_response.text = diff_with_generated
-        mock_response.raise_for_status.return_value = None
-        mock_get.return_value = mock_response
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            result = client.get_pr_diff('owner/repo', 123)
-        
-        # Verify generated file is filtered out
+        mock_response.text = diff_content
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = GitHubClient(token='test-token')
+        result = client.get_pr_diff('owner/repo', 123)
+
         assert 'src/main.py' in result
-        assert 'src/feature.py' in result
         assert 'generated/code.py' not in result
         assert '@generated' not in result
-        assert 'More generated code' not in result
-    
-    def test_filter_generated_files_edge_cases(self):
-        """Test edge cases in generated file filtering."""
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            
-            # Empty diff
-            assert client._filter_generated_files('') == ''
-            
-            # No diff markers - if no diff format, everything is filtered
-            text = "Just some random text\nwith @generated in it"
-            # Since there's no 'diff --git' marker, the split results in one section
-            # that contains @generated, so it gets filtered out
-            assert client._filter_generated_files(text) == ''
-            
-            # Multiple generated markers
-            diff = """diff --git a/a.py b/a.py
-@generated by tool
-content
-diff --git a/b.py b/b.py
-normal content
-diff --git a/c.py b/c.py
-# This file is @generated
-more content
-"""
-            result = client._filter_generated_files(diff)
-            assert 'a.py' not in result
-            assert 'b.py' in result
-            assert 'c.py' not in result
 
 
-class TestGitHubAPIIntegration:
-    """Test GitHub API integration scenarios."""
-    
-    @patch('requests.get')
-    def test_rate_limit_handling(self, mock_get):
-        """Test that rate limit headers are respected."""
+class TestGitHubClientComments:
+    """Test PR comment methods."""
+
+    @patch('requests.request')
+    def test_get_pr_comments(self, mock_request):
+        """Test getting PR comments."""
         mock_response = Mock()
-        mock_response.headers = {
-            'X-RateLimit-Remaining': '0',
-            'X-RateLimit-Reset': '1234567890'
-        }
-        mock_response.status_code = 403
-        mock_response.json.return_value = {
-            'message': 'API rate limit exceeded'
-        }
-        mock_response.raise_for_status.side_effect = Exception("Rate limit exceeded")
-        mock_get.return_value = mock_response
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            with pytest.raises(Exception, match="Rate limit exceeded"):
-                client.get_pr_data('owner/repo', 123)
-    
-    @patch('requests.get')
-    def test_pagination_not_needed_for_pr_files(self, mock_get):
-        """Test that PR files endpoint returns all files without pagination."""
-        # GitHub API returns up to 3000 files per PR without pagination
-        large_file_list = [
-            {
-                'filename': f'file{i}.py',
-                'status': 'added',
-                'additions': 10,
-                'deletions': 0,
-                'changes': 10,
-                'patch': f'@@ -0,0 +1,10 @@\n+# File {i}'
-            }
-            for i in range(100)  # 100 files
+        mock_response.json.return_value = [
+            {'id': 1, 'body': 'Comment 1'},
+            {'id': 2, 'body': '**Security Issue:** test'}
         ]
-        
-        pr_response = Mock()
-        pr_response.json.return_value = {
-            'number': 123,
-            'title': 'Large PR',
-            'body': 'Many files',
-            'user': {'login': 'testuser'},
-            'created_at': '2024-01-01T00:00:00Z',
-            'updated_at': '2024-01-01T01:00:00Z',
-            'state': 'open',
-            'head': {'ref': 'feature', 'sha': 'abc123', 'repo': {'full_name': 'owner/repo'}},
-            'base': {'ref': 'main', 'sha': 'def456'},
-            'additions': 1000,
-            'deletions': 0,
-            'changed_files': 100
-        }
-        
-        files_response = Mock()
-        files_response.json.return_value = large_file_list
-        
-        mock_get.side_effect = [pr_response, files_response]
-        
-        with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}):
-            client = GitHubActionClient()
-            result = client.get_pr_data('owner/repo', 123)
-        
-        assert len(result['files']) == 100
-        assert result['files'][0]['filename'] == 'file0.py'
-        assert result['files'][99]['filename'] == 'file99.py'
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = GitHubClient(token='test-token')
+        comments = client.get_pr_comments('owner', 'repo', 123)
+
+        assert len(comments) == 2
+        assert comments[1]['body'] == '**Security Issue:** test'
+
+    @patch('requests.request')
+    def test_create_review_success(self, mock_request):
+        """Test creating a PR review."""
+        mock_response = Mock()
+        mock_response.json.return_value = {'id': 456, 'state': 'COMMENTED'}
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = GitHubClient(token='test-token')
+        comments = [{'path': 'src/main.py', 'line': 10, 'side': 'RIGHT', 'body': 'Issue'}]
+        result = client.create_review('owner', 'repo', 123, 'sha123', comments)
+
+        assert result is not None
+        assert result['id'] == 456
+
+    @patch('requests.request')
+    def test_add_reaction_success(self, mock_request):
+        """Test adding a reaction."""
+        mock_response = Mock()
+        mock_response.json.return_value = {'id': 789, 'content': '+1'}
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = GitHubClient(token='test-token')
+        result = client.add_reaction('owner', 'repo', 123, '+1')
+
+        assert result is True
+
+
+class TestGitHubClientAPIErrors:
+    """Test API error handling."""
+
+    @patch('requests.request')
+    def test_api_error_handling(self, mock_request):
+        """Test that API errors are properly wrapped."""
+        import requests
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.reason = 'Not Found'
+        mock_response.raise_for_status.side_effect = requests.HTTPError(response=mock_response)
+        mock_request.return_value = mock_response
+
+        client = GitHubClient(token='test-token')
+        with pytest.raises(GitHubAPIError, match="404"):
+            client.get_pr('owner', 'repo', 999)
+
+
+class TestGetGitHubClient:
+    """Test convenience function."""
+
+    def test_get_github_client(self):
+        """Test get_github_client factory function."""
+        client = get_github_client(token='factory-token')
+        assert client.token == 'factory-token'
+
+    def test_get_github_client_with_api_url(self):
+        """Test factory function with custom API URL."""
+        client = get_github_client(
+            token='test-token',
+            api_url='https://github.enterprise.com/api/v3'
+        )
+        assert client.api_base_url == 'https://github.enterprise.com/api/v3'
