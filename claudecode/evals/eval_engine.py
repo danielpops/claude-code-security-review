@@ -12,19 +12,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from ..constants import (
+    TIMEOUT_SHORT,
+    TIMEOUT_GIT_OPERATION,
+    TIMEOUT_GIT_FETCH,
+    TIMEOUT_GIT_CLONE,
+    TIMEOUT_GIT_WORKTREE,
+    TIMEOUT_GIT_WORKTREE_CREATE,
+    TIMEOUT_CLAUDECODE,
+)
 from ..json_parser import parse_json_with_fallbacks
 from ..logger import get_logger
 
 logger = get_logger(__name__)
-
-# Timeout constants (in seconds)
-TIMEOUT_SHORT = 10
-TIMEOUT_GIT_OPERATION = 60
-TIMEOUT_FETCH = 600
-TIMEOUT_CLONE = 300
-TIMEOUT_WORKTREE = 300
-TIMEOUT_WORKTREE_CREATE = 1200
-TIMEOUT_CLAUDECODE = 1800
 
 # Pattern to match tokens/credentials in URLs or error messages
 _CREDENTIAL_PATTERNS = [
@@ -327,7 +327,7 @@ class EvaluationEngine:
                         ['git', 'clone', '--filter=blob:none', clone_url, base_repo_path],
                         check=True,
                         capture_output=True,
-                        timeout=TIMEOUT_CLONE,
+                        timeout=TIMEOUT_GIT_CLONE,
                         env=clone_env,
                     )
                 except subprocess.CalledProcessError as e:
@@ -357,7 +357,7 @@ class EvaluationEngine:
                     ['git', '-C', base_repo_path, 'fetch', 'origin', f'pull/{pr_number}/head'],
                     check=True,
                     capture_output=True,
-                    timeout=TIMEOUT_FETCH,
+                    timeout=TIMEOUT_GIT_FETCH,
                     env=git_env,
                 )
 
@@ -370,7 +370,7 @@ class EvaluationEngine:
                     ],
                     check=True,
                     capture_output=True,
-                    timeout=TIMEOUT_WORKTREE_CREATE,
+                    timeout=TIMEOUT_GIT_WORKTREE_CREATE,
                     env=git_env,
                 )
 
@@ -419,7 +419,7 @@ class EvaluationEngine:
                     ['git', '-C', base_repo_path, 'worktree', 'remove', '--force', worktree_path],
                     check=False,
                     capture_output=True,
-                    timeout=TIMEOUT_WORKTREE,
+                    timeout=TIMEOUT_GIT_WORKTREE,
                 )
 
                 if os.path.exists(worktree_path):
