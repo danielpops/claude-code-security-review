@@ -11,7 +11,10 @@ from claudecode.github_client import (
     GitHubClient,
     GitHubAuthenticationError,
     GitHubAPIError,
+    GitHubValidationError,
     get_github_client,
+    validate_repo_name,
+    validate_pr_number,
 )
 
 
@@ -243,7 +246,7 @@ class TestGitHubClientPRData:
     def test_get_pr_data_invalid_repo_format(self):
         """Test that invalid repo format raises error."""
         client = GitHubClient(token='test-token')
-        with pytest.raises(ValueError, match="Invalid repository format"):
+        with pytest.raises(GitHubValidationError, match="Invalid repository format"):
             client.get_pr_data('invalid-format', 123)
 
 
@@ -385,3 +388,115 @@ class TestGetGitHubClient:
             api_url='https://github.enterprise.com/api/v3'
         )
         assert client.api_base_url == 'https://github.enterprise.com/api/v3'
+
+
+class TestValidateRepoName:
+    """Test repository name validation."""
+
+    def test_valid_repo_name(self):
+        """Test valid repository names."""
+        assert validate_repo_name('owner/repo') == ('owner', 'repo')
+        assert validate_repo_name('my-org/my-repo') == ('my-org', 'my-repo')
+        assert validate_repo_name('Owner123/Repo_Name.js') == ('Owner123', 'Repo_Name.js')
+
+    def test_empty_repo_name(self):
+        """Test empty repository name."""
+        with pytest.raises(GitHubValidationError, match="cannot be empty"):
+            validate_repo_name('')
+
+    def test_missing_slash(self):
+        """Test repository name without slash."""
+        with pytest.raises(GitHubValidationError, match="Expected 'owner/repo'"):
+            validate_repo_name('noslash')
+
+    def test_empty_owner(self):
+        """Test empty owner part."""
+        with pytest.raises(GitHubValidationError, match="owner cannot be empty"):
+            validate_repo_name('/repo')
+
+    def test_empty_repo(self):
+        """Test empty repo part."""
+        with pytest.raises(GitHubValidationError, match="name cannot be empty"):
+            validate_repo_name('owner/')
+
+    def test_invalid_owner_characters(self):
+        """Test owner with invalid characters."""
+        with pytest.raises(GitHubValidationError, match="Invalid repository owner"):
+            validate_repo_name('owner_with_underscore/repo')
+
+    def test_owner_with_hyphen_at_start(self):
+        """Test owner starting with hyphen."""
+        with pytest.raises(GitHubValidationError, match="Invalid repository owner"):
+            validate_repo_name('-owner/repo')
+
+    def test_owner_with_hyphen_at_end(self):
+        """Test owner ending with hyphen."""
+        with pytest.raises(GitHubValidationError, match="Invalid repository owner"):
+            validate_repo_name('owner-/repo')
+
+    def test_invalid_repo_characters(self):
+        """Test repo with invalid characters."""
+        with pytest.raises(GitHubValidationError, match="Invalid repository name"):
+            validate_repo_name('owner/repo with space')
+
+    def test_path_traversal_attempt(self):
+        """Test path traversal attempt."""
+        with pytest.raises(GitHubValidationError, match="invalid characters"):
+            validate_repo_name('owner/../secret')
+
+    def test_leading_slash(self):
+        """Test leading slash."""
+        with pytest.raises(GitHubValidationError, match="invalid characters"):
+            validate_repo_name('/owner/repo')
+
+    def test_single_letter_owner_and_repo(self):
+        """Test single character owner and repo names."""
+        assert validate_repo_name('a/b') == ('a', 'b')
+
+    def test_repo_with_dots(self):
+        """Test repository with dots in name."""
+        assert validate_repo_name('owner/repo.name.js') == ('owner', 'repo.name.js')
+
+
+class TestValidatePRNumber:
+    """Test PR number validation."""
+
+    def test_valid_pr_number_int(self):
+        """Test valid PR number as integer."""
+        assert validate_pr_number(123) == 123
+        assert validate_pr_number(1) == 1
+
+    def test_valid_pr_number_string(self):
+        """Test valid PR number as string."""
+        assert validate_pr_number('456') == 456
+        assert validate_pr_number('1') == 1
+
+    def test_zero_pr_number(self):
+        """Test zero PR number."""
+        with pytest.raises(GitHubValidationError, match="positive integer"):
+            validate_pr_number(0)
+
+    def test_negative_pr_number(self):
+        """Test negative PR number."""
+        with pytest.raises(GitHubValidationError, match="positive integer"):
+            validate_pr_number(-5)
+
+    def test_non_numeric_string(self):
+        """Test non-numeric string."""
+        with pytest.raises(GitHubValidationError, match="positive integer"):
+            validate_pr_number('abc')
+
+    def test_float_pr_number(self):
+        """Test float PR number."""
+        # Python's int() truncates floats, so 123.5 becomes 123
+        assert validate_pr_number(123.5) == 123
+
+    def test_none_pr_number(self):
+        """Test None PR number."""
+        with pytest.raises(GitHubValidationError, match="positive integer"):
+            validate_pr_number(None)
+
+    def test_empty_string_pr_number(self):
+        """Test empty string PR number."""
+        with pytest.raises(GitHubValidationError, match="positive integer"):
+            validate_pr_number('')
