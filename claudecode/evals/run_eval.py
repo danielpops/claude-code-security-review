@@ -20,27 +20,84 @@ class EvalCase:
     description: str = ""
 
 
-@dataclass  
+@dataclass
 class EvalResult:
     """Result of a single evaluation."""
     repo_name: str
     pr_number: int
     description: str
-    
+
     # Evaluation results
     success: bool
     runtime_seconds: float
     findings_count: int
     detected_vulnerabilities: bool
-    
+
     # Optional fields
     error_message: str = ""
     findings_summary: Optional[List[Dict[str, Any]]] = None
     full_findings: Optional[List[Dict[str, Any]]] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
+
+
+def post_comments_to_pr(repo_name: str, pr_number: int, findings: List[Dict[str, Any]], verbose: bool = False) -> None:
+    """Post findings as comments on the PR.
+
+    Args:
+        repo_name: Repository name in format "owner/repo"
+        pr_number: Pull request number
+        findings: List of security findings to post
+        verbose: Enable verbose logging
+    """
+    from ..pr_commenter import PRCommenter
+    from ..github_client import GitHubClient, GitHubClientError
+
+    # Check for GITHUB_TOKEN
+    if not os.environ.get('GITHUB_TOKEN'):
+        print("\nError: GITHUB_TOKEN environment variable is required to post comments")
+        print("Please set GITHUB_TOKEN with a PAT that has repo permissions")
+        return
+
+    if '/' not in repo_name:
+        print(f"\nError: Invalid repository name format: {repo_name}")
+        return
+
+    owner, repo = repo_name.split('/', 1)
+
+    print(f"\nPosting {len(findings)} findings as comments on PR #{pr_number}...")
+
+    try:
+        client = GitHubClient()
+        commenter = PRCommenter(client=client)
+
+        # Get the commit SHA from the PR
+        pr_data = client.get_pr(owner, repo, pr_number)
+        commit_sha = pr_data.get('head', {}).get('sha')
+        if not commit_sha:
+            print("Error: Could not determine commit SHA from PR")
+            return
+
+        count = commenter.post_findings(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            commit_sha=commit_sha,
+            findings=findings,
+            skip_duplicates=True
+        )
+        print(f"Successfully posted {count} comments to PR")
+    except GitHubClientError as e:
+        print(f"GitHub API error: {e}")
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+    except Exception as e:
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        print(f"Error posting comments: {e}")
 
 
 def main():
@@ -75,8 +132,13 @@ def main():
         action="store_true",
         help="Enable verbose logging"
     )
-    
-    
+
+    parser.add_argument(
+        "--post-comments",
+        action="store_true",
+        help="Post findings as comments on the PR (requires GITHUB_TOKEN)"
+    )
+
     args = parser.parse_args()
     
     # Set EVAL_MODE=1 automatically for evaluation runs
@@ -164,9 +226,15 @@ def main():
     
     with open(result_file, 'w') as f:
         json.dump(result.to_dict(), f, indent=2)
-    
+
     print(f"\nResult saved to: {result_file}")
-    
+
+    # Post comments to PR if requested
+    if args.post_comments and result.full_findings:
+        post_comments_to_pr(repo_part, pr_number, result.full_findings, args.verbose)
+    elif args.post_comments and not result.full_findings:
+        print("\nNo findings to post as comments.")
+
     # Exit with appropriate code
     sys.exit(0 if result.success else 1)
 
