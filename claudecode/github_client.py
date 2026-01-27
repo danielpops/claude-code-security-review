@@ -37,6 +37,93 @@ class GitHubAPIError(GitHubClientError):
     pass
 
 
+class GitHubValidationError(GitHubClientError):
+    """Raised when input validation fails."""
+    pass
+
+
+def validate_repo_name(repo_name: str) -> tuple:
+    """Validate and parse a repository name.
+
+    Args:
+        repo_name: Repository name in "owner/repo" format
+
+    Returns:
+        Tuple of (owner, repo)
+
+    Raises:
+        GitHubValidationError: If the repository name is invalid
+    """
+    if not repo_name:
+        raise GitHubValidationError("Repository name cannot be empty")
+
+    if '/' not in repo_name:
+        raise GitHubValidationError(
+            f"Invalid repository format: '{repo_name}'. Expected 'owner/repo'."
+        )
+
+    parts = repo_name.split('/', 1)
+    if len(parts) != 2:
+        raise GitHubValidationError(
+            f"Invalid repository format: '{repo_name}'. Expected 'owner/repo'."
+        )
+
+    owner, repo = parts
+
+    # Validate owner
+    if not owner:
+        raise GitHubValidationError("Repository owner cannot be empty")
+    if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?$', owner):
+        raise GitHubValidationError(
+            f"Invalid repository owner: '{owner}'. "
+            "Must start and end with alphanumeric, may contain hyphens."
+        )
+
+    # Validate repo name
+    if not repo:
+        raise GitHubValidationError("Repository name cannot be empty")
+    if not re.match(r'^[a-zA-Z0-9._\-]+$', repo):
+        raise GitHubValidationError(
+            f"Invalid repository name: '{repo}'. "
+            "May contain alphanumeric, dots, underscores, and hyphens."
+        )
+
+    # Check for path traversal attempts
+    if '..' in repo_name or repo_name.startswith('/'):
+        raise GitHubValidationError(
+            f"Invalid repository name: '{repo_name}'. Contains invalid characters."
+        )
+
+    return owner, repo
+
+
+def validate_pr_number(pr_number: Any) -> int:
+    """Validate a PR number.
+
+    Args:
+        pr_number: PR number (can be int or string)
+
+    Returns:
+        Validated PR number as int
+
+    Raises:
+        GitHubValidationError: If the PR number is invalid
+    """
+    try:
+        pr_num = int(pr_number)
+    except (TypeError, ValueError):
+        raise GitHubValidationError(
+            f"Invalid PR number: '{pr_number}'. Must be a positive integer."
+        )
+
+    if pr_num <= 0:
+        raise GitHubValidationError(
+            f"Invalid PR number: {pr_num}. Must be a positive integer."
+        )
+
+    return pr_num
+
+
 class GitHubClient:
     """Unified GitHub API client supporting both github.com and GitHub Enterprise.
 
@@ -297,11 +384,12 @@ class GitHubClient:
 
         Returns:
             Dictionary with PR data and files
-        """
-        if '/' not in repo_full_name:
-            raise ValueError(f"Invalid repository format: {repo_full_name}. Expected 'owner/repo'.")
 
-        owner, repo = repo_full_name.split('/', 1)
+        Raises:
+            GitHubValidationError: If repository name or PR number is invalid
+        """
+        owner, repo = validate_repo_name(repo_full_name)
+        pr_number = validate_pr_number(pr_number)
 
         pr = self.get_pr(owner, repo, pr_number)
         files = self.get_pr_files(owner, repo, pr_number)
@@ -354,11 +442,12 @@ class GitHubClient:
 
         Returns:
             Filtered diff text
-        """
-        if '/' not in repo_full_name:
-            raise ValueError(f"Invalid repository format: {repo_full_name}. Expected 'owner/repo'.")
 
-        owner, repo = repo_full_name.split('/', 1)
+        Raises:
+            GitHubValidationError: If repository name or PR number is invalid
+        """
+        owner, repo = validate_repo_name(repo_full_name)
+        pr_number = validate_pr_number(pr_number)
 
         response = self._request(
             'GET',
