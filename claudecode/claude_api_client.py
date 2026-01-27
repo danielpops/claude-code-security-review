@@ -19,25 +19,39 @@ logger = get_logger(__name__)
 
 
 class ClaudeAPIClient:
-    """Client for calling Claude API directly for security analysis tasks."""
-    
-    def __init__(self, 
-                 model: Optional[str] = None,
-                 api_key: Optional[str] = None,
-                 timeout_seconds: Optional[int] = None,
-                 max_retries: Optional[int] = None):
+    """Client for calling Claude API directly for security analysis tasks.
+
+    This client supports custom API endpoints via the base_url parameter,
+    enabling use with LiteLLM proxies, AWS Bedrock, or other compatible
+    API endpoints.
+
+    Environment Variables:
+        ANTHROPIC_API_KEY: API key for authentication
+        ANTHROPIC_BASE_URL: Custom API endpoint URL (e.g., for LiteLLM proxy)
+    """
+
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        max_retries: Optional[int] = None,
+        base_url: Optional[str] = None,
+    ):
         """Initialize Claude API client.
-        
+
         Args:
             model: Claude model to use
             api_key: Anthropic API key (if None, reads from ANTHROPIC_API_KEY env var)
             timeout_seconds: Request timeout in seconds
             max_retries: Maximum retry attempts for API calls
+            base_url: Custom API base URL (if None, reads from ANTHROPIC_BASE_URL env var)
+                     Use this for LiteLLM proxy, AWS Bedrock, or other compatible endpoints
         """
         self.model = model or DEFAULT_CLAUDE_MODEL
         self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
         self.max_retries = max_retries or DEFAULT_MAX_RETRIES
-        
+
         # Get API key from environment or parameter
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not self.api_key:
@@ -45,9 +59,17 @@ class ClaudeAPIClient:
                 "No Anthropic API key found. Please set ANTHROPIC_API_KEY environment variable "
                 "or provide api_key parameter."
             )
-        
-        # Initialize Anthropic client
-        self.client = Anthropic(api_key=self.api_key)
+
+        # Get base URL for custom endpoints (e.g., LiteLLM proxy)
+        self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL")
+
+        # Initialize Anthropic client with optional base_url
+        client_kwargs = {"api_key": self.api_key}
+        if self.base_url:
+            client_kwargs["base_url"] = self.base_url
+            logger.info(f"Using custom API endpoint: {self.base_url}")
+
+        self.client = Anthropic(**client_kwargs)
         logger.info("Claude API client initialized successfully")
     
     def validate_api_access(self) -> Tuple[bool, str]:
@@ -354,23 +376,28 @@ Respond with EXACTLY this JSON structure (no markdown, no code blocks):
             return False, "", error_msg
 
 
-def get_claude_api_client(model: str = DEFAULT_CLAUDE_MODEL,
-                         api_key: Optional[str] = None,
-                         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> ClaudeAPIClient:
+def get_claude_api_client(
+    model: str = DEFAULT_CLAUDE_MODEL,
+    api_key: Optional[str] = None,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    base_url: Optional[str] = None,
+) -> ClaudeAPIClient:
     """Convenience function to get Claude API client.
-    
+
     Args:
         model: Claude model identifier
         api_key: Optional API key (reads from environment if not provided)
         timeout_seconds: API call timeout
-        
+        base_url: Optional custom API endpoint URL (e.g., for LiteLLM proxy)
+
     Returns:
         Initialized ClaudeAPIClient instance
     """
     return ClaudeAPIClient(
         model=model,
         api_key=api_key,
-        timeout_seconds=timeout_seconds
+        timeout_seconds=timeout_seconds,
+        base_url=base_url,
     )
 
 
