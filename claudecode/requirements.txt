@@ -17,5 +17,10 @@ anthropic>=0.39.0
 # YAML parsing for configuration files
 PyYAML>=6.0.0
 
+# Webhook server dependencies
+fastapi>=0.109.0
+uvicorn>=0.27.0
+PyJWT>=2.8.0
+
 # Note: Claude CLI tool must be installed separately
 # The claude command-line tool is required for security analysis
